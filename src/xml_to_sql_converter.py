@@ -3,464 +3,433 @@ from collections import defaultdict
 import re
 import sys
 import os
-from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 class XMLToSQLConverter:
     def __init__(self):
         self.tables = defaultdict(dict)
         self.relationships = []
-        self.namespace = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
+        self.value_samples = defaultdict(list)
+        self.table_counter = 1
         
     def clean_name(self, name):
-        """Remove caracteres especiais e converte para snake_case"""
+        """Remove special characters and convert to snake_case"""
+        if '}' in name:
+            name = name.split('}')[-1]
         name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
         name = re.sub(r'_+', '_', name)
         return name.lower()
     
-    def infer_data_type(self, value):
-        """Infere o tipo de dados baseado no valor"""
-        if value is None:
+    def analyze_value_pattern(self, value):
+        """Generic value pattern analysis for any XML"""
+        if value is None or value == "":
             return 'VARCHAR(255)'
         
-        value_str = str(value)
+        value_str = str(value).strip()
         
-        # Verifica se é numérico
+        # 1. Check for datetime patterns
+        dt_pattern = self._check_datetime_pattern(value_str)
+        if dt_pattern:
+            return dt_pattern
+        
+        # 2. Check for boolean patterns
+        if self._is_boolean(value_str):
+            return 'BOOLEAN'
+        
+        # 3. Check for numeric patterns
+        num_pattern = self._check_numeric_pattern(value_str)
+        if num_pattern:
+            return num_pattern
+        
+        # 4. Check for UUID/GUID patterns
+        if self._is_uuid(value_str):
+            return 'UUID'
+        
+        # 5. Check for email patterns
+        if self._is_email(value_str):
+            return 'VARCHAR(255)'
+        
+        # 6. Check for URL patterns
+        if self._is_url(value_str):
+            return 'VARCHAR(500)'
+        
+        # 7. Default to string based on length and content analysis
+        return self._determine_string_type(value_str)
+    
+    def _check_datetime_pattern(self, value):
+        """Check for various datetime patterns"""
+        patterns = [
+            # ISO 8601 with timezone
+            (r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$', 'TIMESTAMP'),
+            # ISO 8601 without timezone
+            (r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', 'TIMESTAMP'),
+            # Date only
+            (r'^\d{4}-\d{2}-\d{2}$', 'DATE'),
+            # Various date formats
+            (r'^\d{2}/\d{2}/\d{4}$', 'DATE'),
+            (r'^\d{2}-\d{2}-\d{4}$', 'DATE'),
+            # Time only
+            (r'^\d{2}:\d{2}:\d{2}$', 'TIME'),
+            (r'^\d{2}:\d{2}:\d{2}\.\d+$', 'TIME'),
+        ]
+        
+        for pattern, sql_type in patterns:
+            if re.match(pattern, value):
+                return sql_type
+        return None
+    
+    def _is_boolean(self, value):
+        """Check for boolean patterns"""
+        boolean_values = {'true', 'false', '1', '0', 'yes', 'no', 'y', 'n', 't', 'f'}
+        return value.lower() in boolean_values
+    
+    def _check_numeric_pattern(self, value):
+        """Comprehensive numeric type analysis"""
+        # Skip if value contains letters (except for decimal separators and minus sign)
+        if re.search(r'[a-zA-Z]', value.replace(',', '').replace('.', '').replace('-', '')):
+            return None
+            
+        cleaned = re.sub(r'[^\d.,-]', '', value)
+        if not cleaned:
+            return None
+        
         try:
-            float(value_str)
-            if '.' in value_str:
-                return 'DECIMAL(15,4)'
+            # Handle different decimal separators
+            if ',' in cleaned and '.' in cleaned:
+                # If both separators present, assume comma is thousands and dot is decimal
+                if cleaned.rfind(',') > cleaned.rfind('.'):
+                    cleaned = cleaned.replace('.', '').replace(',', '.')
+                else:
+                    cleaned = cleaned.replace(',', '')
+            elif ',' in cleaned:
+                # Check if comma is used as decimal separator
+                parts = cleaned.split(',')
+                if len(parts) == 2 and len(parts[1]) <= 2:
+                    # Likely decimal separator (e.g., "123,45")
+                    cleaned = cleaned.replace(',', '.')
+                else:
+                    # Likely thousands separator (e.g., "1,234")
+                    cleaned = cleaned.replace(',', '')
+            
+            cleaned = re.sub(r'[^\d.-]', '', cleaned)
+            
+            if not cleaned or cleaned == '-' or cleaned == '.':
+                return None
+                
+            numeric_value = Decimal(cleaned)
+            
+            # Check if it's an integer
+            if numeric_value == numeric_value.to_integral_value():
+                # Integer types based on value range
+                if abs(numeric_value) <= 127:
+                    return 'SMALLINT'
+                elif abs(numeric_value) <= 32767:
+                    return 'INTEGER'
+                elif abs(numeric_value) <= 2147483647:
+                    return 'BIGINT'
+                else:
+                    return 'NUMERIC(20,0)'
             else:
-                return 'INTEGER'
-        except ValueError:
-            pass
+                # Decimal type - analyze precision and scale
+                parts = str(numeric_value).split('.')
+                integer_digits = len(parts[0].lstrip('-'))
+                decimal_digits = len(parts[1]) if len(parts) > 1 else 0
+                
+                total_digits = integer_digits + decimal_digits
+                if total_digits <= 15:
+                    return f'DECIMAL(15,{min(decimal_digits, 4)})'
+                else:
+                    return f'DECIMAL({total_digits},{min(decimal_digits, 4)})'
+                    
+        except (InvalidOperation, ValueError):
+            return None
+    
+    def _is_uuid(self, value):
+        """Check for UUID/GUID patterns"""
+        uuid_patterns = [
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+            r'^[0-9a-f]{32}$',
+            r'^{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}}$',
+        ]
+        return any(re.match(pattern, value.lower()) for pattern in uuid_patterns)
+    
+    def _is_email(self, value):
+        """Check for email pattern"""
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return re.match(email_pattern, value) is not None
+    
+    def _is_url(self, value):
+        """Check for URL pattern"""
+        url_pattern = r'^(https?|ftp)://[^\s/$.?#].[^\s]*$'
+        return re.match(url_pattern, value) is not None
+    
+    def _determine_string_type(self, value):
+        """Determine appropriate string type based on content analysis"""
+        length = len(value)
         
-        # Verifica se é data
-        if re.match(r'\d{4}-\d{2}-\d{2}', value_str):
-            return 'TIMESTAMP'
+        # Analyze content characteristics
+        has_spaces = ' ' in value
+        has_special_chars = bool(re.search(r'[^a-zA-Z0-9\s\.\-_]', value))
+        is_multi_line = '\n' in value
         
-        # Verifica tamanho do texto
-        length = len(value_str)
-        if length <= 50:
+        if is_multi_line or length > 1000:
+            return 'TEXT'
+        elif length <= 10 and not has_spaces and not has_special_chars:
+            return 'VARCHAR(10)'
+        elif length <= 20 and not has_spaces:
+            return 'VARCHAR(20)'
+        elif length <= 50:
             return 'VARCHAR(50)'
         elif length <= 100:
             return 'VARCHAR(100)'
         elif length <= 255:
             return 'VARCHAR(255)'
+        elif length <= 500:
+            return 'VARCHAR(500)'
+        elif length <= 1000:
+            return 'VARCHAR(1000)'
         else:
             return 'TEXT'
-    
-    def analyze_xml_structure(self, element, parent_path="", parent_table=""):
-        """Analisa recursivamente a estrutura do XML"""
-        current_path = f"{parent_path}/{element.tag.split('}')[-1]}" if parent_path else element.tag.split('}')[-1]
-        current_table = self.clean_name(element.tag.split('}')[-1])
+
+    def analyze_xml_structure(self, element, parent_table="", depth=0, path=""):
+        """Recursively analyzes XML structure for any type of XML"""
+        if depth > 20:  # Prevent infinite recursion
+            return
         
-        # Se é um elemento que se repete, cria uma tabela separada
-        if parent_table and len(element) > 0 and any(child.text for child in element):
-            if current_table not in self.tables:
-                self.tables[current_table] = {
-                    'columns': {},
-                    'primary_key': f'id_{current_table}',
-                    'parent': parent_table
-                }
-                
-            # Adiciona foreign key para a tabela pai
-            if parent_table and current_table != parent_table:
-                fk_column = f'id_{parent_table}'
-                self.tables[current_table]['columns'][fk_column] = 'BIGINT'
-                self.relationships.append({
-                    'from_table': current_table,
-                    'to_table': parent_table,
-                    'from_column': fk_column,
-                    'to_column': f'id_{parent_table}'
-                })
+        current_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        current_table = self.clean_name(current_tag)
+        current_path = f"{path}/{current_tag}" if path else current_tag
         
-        # Processa atributos
-        for attr_name, attr_value in element.attrib.items():
-            clean_attr = self.clean_name(attr_name)
-            if parent_table:
-                table_name = parent_table
-            else:
-                table_name = current_table
-                
-            if table_name not in self.tables:
-                self.tables[table_name] = {
+        # Collect value samples for type inference
+        if element.text and element.text.strip():
+            element_text = element.text.strip()
+            sample_key = f"{current_path}/text"
+            self.value_samples[sample_key].append(element_text)
+        
+        # TABLE DETECTION LOGIC - Generic approach
+        should_create_table = self._should_create_table(element, current_tag, depth, parent_table)
+        
+        # Determine target table for columns
+        if should_create_table:
+            target_table = current_table
+            if target_table not in self.tables:
+                self.tables[target_table] = {
                     'columns': {},
-                    'primary_key': f'id_{table_name}'
+                    'primary_key': f'id_{target_table}',
+                    'parent': parent_table,
                 }
             
-            self.tables[table_name]['columns'][clean_attr] = self.infer_data_type(attr_value)
+            # Add foreign key to parent table
+            if parent_table and target_table != parent_table:
+                fk_column = f'id_{parent_table}'
+                self.tables[target_table]['columns'][fk_column] = 'BIGINT'
+                
+                if not any(r['from_column'] == fk_column and r['from_table'] == target_table 
+                          for r in self.relationships):
+                    self.relationships.append({
+                        'from_table': target_table,
+                        'to_table': parent_table,
+                        'from_column': fk_column,
+                        'to_column': f'id_{parent_table}'
+                    })
+        else:
+            target_table = parent_table if parent_table else current_table
         
-        # Processa elementos filhos
+        # Ensure target table exists
+        if target_table and target_table not in self.tables:
+            self.tables[target_table] = {
+                'columns': {},
+                'primary_key': f'id_{target_table}',
+                'parent': parent_table,
+            }
+        
+        # Process attributes as columns
+        for attr_name, attr_value in element.attrib.items():
+            clean_attr = self.clean_name(attr_name)
+            attr_sample_key = f"{current_path}/@{attr_name}"
+            self.value_samples[attr_sample_key].append(attr_value)
+            
+            samples = self.value_samples[attr_sample_key]
+            inferred_type = self.analyze_value_pattern(attr_value)
+            self.tables[target_table]['columns'][clean_attr] = inferred_type
+        
+        # Process element content
         has_text_content = element.text and element.text.strip()
         child_elements = list(element)
         
         if has_text_content and not child_elements:
-            # Elemento com apenas texto
-            if parent_table:
-                table_name = parent_table
-                column_name = self.clean_name(element.tag.split('}')[-1])
-                
-                if table_name not in self.tables:
-                    self.tables[table_name] = {
-                        'columns': {},
-                        'primary_key': f'id_{table_name}'
-                    }
-                
-                self.tables[table_name]['columns'][column_name] = self.infer_data_type(element.text)
-        else:
-            # Elemento com filhos, processa recursivamente
-            for child in element:
-                self.analyze_xml_structure(child, current_path, current_table)
-    
-    def generate_sql_script(self):
-        """Gera o script SQL completo"""
-        sql_script = ["-- SQL Schema gerado automaticamente a partir do XML da NFe"]
-        sql_script.append("-- Otimizado para uso com Hibernate/JPA\n")
+            column_name = self.clean_name(current_tag)
+            sample_key = f"{current_path}/text"
+            samples = self.value_samples[sample_key]
+            inferred_type = self.analyze_value_pattern(element.text.strip())
+            self.tables[target_table]['columns'][column_name] = inferred_type
         
-        # Cria sequência para IDs (se usar PostgreSQL)
+        # Process children recursively
+        for child in child_elements:
+            child_target_table = current_table if should_create_table else target_table
+            self.analyze_xml_structure(child, child_target_table, depth + 1, current_path)
+    
+    def _should_create_table(self, element, tag_name, depth, parent_table):
+        """Generic table creation logic for any XML"""
+        child_elements = list(element)
+        
+        # Root element always becomes a table
+        if depth == 0:
+            return True
+        
+        # Elements with attributes are good table candidates
+        if element.attrib:
+            return True
+        
+        # Elements with multiple different children
+        if child_elements:
+            child_tags = set(child.tag.split('}')[-1].lower() for child in child_elements)
+            if len(child_tags) > 2:
+                return True
+            
+            # If many children of same type, might be a list (create table)
+            if len(child_elements) > 3 and len(child_tags) == 1:
+                return True
+        
+        # Elements that appear to be complex structures
+        if len(child_elements) > 0 and any(len(list(child)) > 0 for child in child_elements):
+            return True
+        
+        return False
+
+    def generate_sql_script(self):
+        """Generates SQL script with discovered data types"""
+        sql_script = ["-- SQL Schema automatically generated from XML"]
+        sql_script.append("-- Generic XML to SQL converter\n")
+        
         sql_script.append("CREATE SEQUENCE hibernate_sequence START 1 INCREMENT 1;\n")
         
-        # Cria tabelas
+        # Create tables
         for table_name, table_info in self.tables.items():
+            data_columns = {k: v for k, v in table_info['columns'].items() 
+                          if not k.startswith('id_') or k == table_info['primary_key']}
+            
+            if len(data_columns) <= 1:
+                continue
+                
             sql_script.append(f"CREATE TABLE {table_name} (")
             
-            # Coluna ID primária
             pk_column = table_info['primary_key']
             sql_script.append(f"    {pk_column} BIGINT PRIMARY KEY,")
             
-            # Demais colunas
-            columns = list(table_info['columns'].items())
+            columns = list(data_columns.items())
             for i, (col_name, col_type) in enumerate(columns):
-                comma = "," if i < len(columns) - 1 else ""
-                sql_script.append(f"    {col_name} {col_type}{comma}")
+                if col_name != pk_column:
+                    comma = "," if i < len(columns) - 1 or any(c[0] != pk_column for c in columns[i+1:]) else ""
+                    sql_script.append(f"    {col_name} {col_type}{comma}")
             
             sql_script.append(");\n")
         
-        # Cria constraints de foreign keys
-        for rel in self.relationships:
-            sql_script.append(
-                f"ALTER TABLE {rel['from_table']} "
-                f"ADD CONSTRAINT fk_{rel['from_table']}_{rel['to_table']} "
-                f"FOREIGN KEY ({rel['from_column']}) "
-                f"REFERENCES {rel['to_table']}({rel['to_column']});"
-            )
+        # Foreign keys
+        if self.relationships:
+            sql_script.append("-- Foreign key constraints")
+            for rel in self.relationships:
+                if (rel['from_table'] in self.tables and 
+                    rel['to_table'] in self.tables):
+                    sql_script.append(
+                        f"ALTER TABLE {rel['from_table']} "
+                        f"ADD CONSTRAINT fk_{rel['from_table']}_{rel['to_table']} "
+                        f"FOREIGN KEY ({rel['from_column']}) "
+                        f"REFERENCES {rel['to_table']}({rel['to_column']});"
+                    )
         
-        # Cria índices para melhor performance
-        for table_name in self.tables.keys():
-            sql_script.append(f"CREATE INDEX idx_{table_name}_id ON {table_name}({self.tables[table_name]['primary_key']});")
-        
-        # Índices para foreign keys
-        for rel in self.relationships:
-            sql_script.append(f"CREATE INDEX idx_{rel['from_table']}_{rel['from_column']} ON {rel['from_table']}({rel['from_column']});")
-        
-        sql_script.append("\n-- Fim do script SQL")
-        
-        return "\n".join(sql_script)
-    
-    def generate_java_entities(self):
-        """Gera classes Java/JPA completas com todos os métodos"""
-        entities = []
-        
+        # Indexes
+        sql_script.append("\n-- Indexes for performance")
         for table_name, table_info in self.tables.items():
-            class_name = ''.join(word.capitalize() for word in table_name.split('_'))
-            
-            # Header da classe
-            entities.append("package com.example.nfe.entities;")
-            entities.append("")
-            entities.append("import javax.persistence.*;")
-            entities.append("import java.math.BigDecimal;")
-            entities.append("import java.time.LocalDateTime;")
-            entities.append("import java.util.Objects;")
-            entities.append("")
-            entities.append("@Entity")
-            entities.append(f"@Table(name = \"{table_name}\")")
-            entities.append(f"public class {class_name} {{")
-            entities.append("")
-            
-            # Campos
-            fields = []
-            
-            # Campo ID
-            fields.append("    @Id")
-            fields.append("    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = \"hibernate_sequence\")")
-            fields.append("    @SequenceGenerator(name = \"hibernate_sequence\", sequenceName = \"hibernate_sequence\")")
-            fields.append(f"    @Column(name = \"{table_info['primary_key']}\")")
-            fields.append("    private Long id;")
-            fields.append("")
-            
-            # Demais campos
-            for col_name, col_type in table_info['columns'].items():
-                java_type = self.get_java_type(col_type)
-                field_name = self.convert_to_camel_case(col_name)
-                
-                # Verifica se é foreign key
-                is_fk = col_name.startswith('id_') and any(r['from_column'] == col_name for r in self.relationships)
-                
-                if is_fk:
-                    # Encontra a tabela relacionada
-                    rel = next(r for r in self.relationships if r['from_column'] == col_name)
-                    target_class = ''.join(word.capitalize() for word in rel['to_table'].split('_'))
-                    
-                    fields.append("    @ManyToOne(fetch = FetchType.LAZY)")
-                    fields.append(f"    @JoinColumn(name = \"{col_name}\")")
-                    fields.append(f"    private {target_class} {self.convert_to_camel_case(rel['to_table'])};")
-                else:
-                    fields.append(f"    @Column(name = \"{col_name}\")")
-                    fields.append(f"    private {java_type} {field_name};")
-                fields.append("")
-            
-            # Construtor padrão
-            fields.append(f"    public {class_name}() {{")
-            fields.append("        // Construtor padrão exigido pelo JPA")
-            fields.append("    }")
-            fields.append("")
-            
-            # Construtor com campos
-            field_names = []
-            for col_name in table_info['columns'].keys():
-                is_fk = col_name.startswith('id_') and any(r['from_column'] == col_name for r in self.relationships)
-                if not is_fk:
-                    field_names.append(self.convert_to_camel_case(col_name))
-            
-            if field_names:
-                constructor_params = []
-                for field_name in field_names:
-                    java_type = next(self.get_java_type(table_info['columns'][col]) 
-                                   for col in table_info['columns'] 
-                                   if self.convert_to_camel_case(col) == field_name)
-                    constructor_params.append(f"{java_type} {field_name}")
-                
-                fields.append(f"    public {class_name}({', '.join(constructor_params)}) {{")
-                for field_name in field_names:
-                    fields.append(f"        this.{field_name} = {field_name};")
-                fields.append("    }")
-                fields.append("")
-            
-            # Getters e Setters
-            all_fields = ['id'] + [self.convert_to_camel_case(col) for col in table_info['columns'].keys()]
-            
-            # Adiciona campos de relacionamento
-            for rel in [r for r in self.relationships if r['from_table'] == table_name]:
-                field_name = self.convert_to_camel_case(rel['to_table'])
-                target_class = ''.join(word.capitalize() for word in rel['to_table'].split('_'))
-                all_fields.append(field_name)
-                
-                # Getter para relacionamento
-                fields.append(f"    public {target_class} get{field_name.capitalize()}() {{")
-                fields.append(f"        return {field_name};")
-                fields.append("    }")
-                fields.append("")
-                
-                # Setter para relacionamento
-                fields.append(f"    public void set{field_name.capitalize()}({target_class} {field_name}) {{")
-                fields.append(f"        this.{field_name} = {field_name};")
-                fields.append("    }")
-                fields.append("")
-            
-            for field_name in all_fields:
-                if field_name == 'id':
-                    java_type = 'Long'
-                else:
-                    # Encontra o tipo correto
-                    if any(r['from_table'] == table_name and self.convert_to_camel_case(r['to_table']) == field_name for r in self.relationships):
-                        rel = next(r for r in self.relationships if r['from_table'] == table_name and self.convert_to_camel_case(r['to_table']) == field_name)
-                        java_type = ''.join(word.capitalize() for word in rel['to_table'].split('_'))
-                    else:
-                        col_name = next((col for col in table_info['columns'] if self.convert_to_camel_case(col) == field_name), None)
-                        if col_name:
-                            java_type = self.get_java_type(table_info['columns'][col_name])
-                        else:
-                            continue
-                
-                # Getter
-                fields.append(f"    public {java_type} get{field_name.capitalize()}() {{")
-                fields.append(f"        return {field_name};")
-                fields.append("    }")
-                fields.append("")
-                
-                # Setter
-                fields.append(f"    public void set{field_name.capitalize()}({java_type} {field_name}) {{")
-                fields.append(f"        this.{field_name} = {field_name};")
-                fields.append("    }")
-                fields.append("")
-            
-            # equals e hashCode
-            fields.append("    @Override")
-            fields.append("    public boolean equals(Object o) {")
-            fields.append("        if (this == o) return true;")
-            fields.append("        if (o == null || getClass() != o.getClass()) return false;")
-            fields.append(f"        {class_name} that = ({class_name}) o;")
-            fields.append("        return Objects.equals(id, that.id);")
-            fields.append("    }")
-            fields.append("")
-            
-            fields.append("    @Override")
-            fields.append("    public int hashCode() {")
-            fields.append("        return Objects.hash(id);")
-            fields.append("    }")
-            fields.append("")
-            
-            # toString - CORRIGIDO
-            fields.append("    @Override")
-            fields.append("    public String toString() {")
-            fields.append(f"        return \"{class_name}{{\" +")
-            
-            toString_fields = ['id']
-            for col_name in table_info['columns'].keys():
-                if not col_name.startswith('id_') or not any(r['from_column'] == col_name for r in self.relationships):
-                    toString_fields.append(self.convert_to_camel_case(col_name))
-            
-            toString_parts = []
-            for i, field in enumerate(toString_fields):
-                if i == 0:
-                    toString_parts.append(f'                \"{field}=\" + {field}')
-                else:
-                    toString_parts.append(f'                \", {field}=\" + {field}')
-            
-            fields.append(" + \n".join(toString_parts) + " +")
-            fields.append("                '}';")
-            fields.append("    }")
-            
-            # Fim da classe
-            entities.extend(fields)
-            entities.append("}")
-            entities.append("")
+            if len(table_info['columns']) > 1:
+                pk = table_info['primary_key']
+                sql_script.append(f"CREATE INDEX idx_{table_name}_pk ON {table_name}({pk});")
         
-        return "\n".join(entities)
-    
-    def get_java_type(self, sql_type):
-        """Converte tipo SQL para tipo Java"""
-        type_mapping = {
-            'BIGINT': 'Long',
-            'INTEGER': 'Integer',
-            'DECIMAL': 'BigDecimal',
-            'VARCHAR': 'String',
-            'TEXT': 'String',
-            'TIMESTAMP': 'LocalDateTime'
-        }
+        for rel in self.relationships:
+            if rel['from_table'] in self.tables:
+                sql_script.append(f"CREATE INDEX idx_{rel['from_table']}_{rel['from_column']} ON {rel['from_table']}({rel['from_column']});")
         
-        for sql, java in type_mapping.items():
-            if sql in sql_type:
-                return java
-        return 'String'
-    
-    def convert_to_camel_case(self, snake_str):
-        """Converte snake_case para camelCase"""
-        components = snake_str.split('_')
-        return components[0] + ''.join(x.title() for x in components[1:])
+        sql_script.append("\n-- End of SQL script")
+        return "\n".join(sql_script)
 
 def process_xml_file(xml_file_path):
-    """Processa um arquivo XML individual"""
+    """Processes individual XML file"""
     print(f"\n{'='*60}")
-    print(f"Processando arquivo: {xml_file_path}")
+    print(f"Processing file: {xml_file_path}")
     print(f"{'='*60}")
     
     try:
-        # Verifica se o arquivo existe
         if not os.path.exists(xml_file_path):
-            print(f"ERRO: Arquivo não encontrado: {xml_file_path}")
+            print(f"ERROR: File not found: {xml_file_path}")
             return False
         
-        # Lê o conteúdo do arquivo
         with open(xml_file_path, 'r', encoding='utf-8') as f:
             xml_content = f.read()
         
-        # Cria o conversor
         converter = XMLToSQLConverter()
-        
-        # Parse do XML
         root = ET.fromstring(xml_content)
         
-        # Encontra o elemento NFe dentro do namespace
-        nfe_element = root.find('.//ns:NFe', converter.namespace)
-        if nfe_element is None:
-            nfe_element = root
+        converter.analyze_xml_structure(root)
         
-        # Analisa a estrutura do XML
-        converter.analyze_xml_structure(nfe_element)
+        if not converter.tables:
+            print(f"WARNING: No tables generated from XML structure")
+            return False
         
-        # Gera nomes de arquivo baseados no arquivo de entrada
         base_name = os.path.splitext(os.path.basename(xml_file_path))[0]
-        sql_file = f"{base_name}_schema.sql"
-        java_file = f"{base_name}_entities.java"
+        output_dir = f"{base_name}_output"
         
-        # Gera SQL
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
         sql_script = converter.generate_sql_script()
-        print("✓ Script SQL gerado com sucesso")
+        sql_file = os.path.join(output_dir, f"{base_name}_schema.sql")
         
-        # Gera classes Java
-        java_entities = converter.generate_java_entities()
-        print("✓ Classes Java completas geradas com sucesso")
-        
-        # Salva em arquivos
         with open(sql_file, 'w', encoding='utf-8') as f:
             f.write(sql_script)
         
-        with open(java_file, 'w', encoding='utf-8') as f:
-            f.write(java_entities)
-            
-        print(f"✓ Arquivos salvos:")
-        print(f"  - {sql_file}")
-        print(f"  - {java_file}")
+        print(f"✅ SQL script generated successfully: {sql_file}")
         
-        # Exibe estatísticas
-        print(f"\n📊 Estatísticas:")
-        print(f"  - Tabelas criadas: {len(converter.tables)}")
-        print(f"  - Relacionamentos: {len(converter.relationships)}")
+        print(f"\n📊 Statistics:")
+        print(f"  - Tables created: {len(converter.tables)}")
+        print(f"  - Relationships: {len(converter.relationships)}")
+        
+        # Show some type inference examples
+        print(f"\n🔍 Type inference examples:")
+        for sample_key, samples in list(converter.value_samples.items())[:5]:
+            if samples:
+                inferred_type = converter.analyze_value_pattern(samples[0])
+                print(f"  - {sample_key}: '{samples[0]}' → {inferred_type}")
         
         return True
         
-    except ET.ParseError as e:
-        print(f"❌ Erro ao parsear XML: {e}")
-        return False
     except Exception as e:
-        print(f"❌ Erro ao processar arquivo: {e}")
+        print(f"❌ Error processing file: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def main():
-    """Função principal que processa arquivos da linha de comando"""
-    
-    # Verifica se foram passados argumentos
     if len(sys.argv) < 2:
-        print("Uso: python xml_to_sql_converter.py <arquivo1.xml> [arquivo2.xml ...]")
-        print("\nExemplos:")
-        print("  python xml_to_sql_converter.py nfe.xml")
-        print("  python xml_to_sql_converter.py nfe1.xml nfe2.xml nfe3.xml")
-        print("  python xml_to_sql_converter.py *.xml")
+        print("Generic XML to SQL Converter")
+        print("Usage: python xml_to_sql_converter.py <file1.xml> [file2.xml ...]")
         return
     
-    # Lista de arquivos para processar
     xml_files = sys.argv[1:]
+    print("🚀 Starting XML to SQL conversion")
     
-    print("🚀 Iniciando conversão de XML para SQL/Hibernate")
-    print(f"📁 Arquivos a processar: {len(xml_files)}")
+    valid_files = [f for f in xml_files if os.path.exists(f) and f.lower().endswith('.xml')]
     
-    # Contadores de sucesso/erro
+    if not valid_files:
+        print("❌ No valid XML files to process")
+        return
+    
     success_count = 0
-    error_count = 0
-    
-    # Processa cada arquivo
-    for xml_file in xml_files:
+    for xml_file in valid_files:
         if process_xml_file(xml_file):
             success_count += 1
-        else:
-            error_count += 1
     
-    # Resumo final
     print(f"\n{'='*60}")
-    print("📋 RESUMO FINAL")
-    print(f"{'='*60}")
-    print(f"✅ Arquivos processados com sucesso: {success_count}")
-    print(f"❌ Arquivos com erro: {error_count}")
-    print(f"📊 Total de arquivos: {len(xml_files)}")
-    
-    if success_count > 0:
-        print(f"\n🎉 Conversão concluída! Os seguintes arquivos foram gerados:")
-        for xml_file in xml_files:
-            if os.path.exists(xml_file):
-                base_name = os.path.splitext(os.path.basename(xml_file))[0]
-                print(f"   📄 {base_name}_schema.sql")
-                print(f"   📄 {base_name}_entities.java")
+    print(f"✅ Files processed successfully: {success_count}/{len(valid_files)}")
 
 if __name__ == "__main__":
     main()
