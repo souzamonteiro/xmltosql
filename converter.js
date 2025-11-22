@@ -5,29 +5,29 @@ import fs from 'fs';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
-// Default rules (same as web version)
-const defaultRules = {
+// Default rules
+export const defaultRules = {
   string: ["CNPJ", "CPF", "CEP", "fone", "telefone", "chNFe", "IE", "cEAN", "cEANTrib"],
   integer: ["tpNF", "idDest", "tpImp", "tpEmis", "cDV", "tpAmb", "finNFe", "indFinal", "indPres", "procEmi", "CRT", "indIEDest", "indTot", "nItemPed", "modBC", "CST", "cEnq", "modFrete", "nVol", "indPag", "tPag", "tpIntegra", "tBand"],
   real: ["vUnCom", "vProd", "vUnTrib", "pRedBC", "vBC", "pICMS", "vICMS", "pIPI", "vIPI", "vBC", "pPIS", "vPIS", "pCOFINS", "vCOFINS", "vOrig", "vLiq", "vDup", "vPag", "pesoL", "pesoB"]
 };
 
-// Data type detection functions (same as web version)
-function isString(value) {
+// Data type detection functions
+export function isString(value) {
   return typeof value === 'string';
 }
 
-function isInteger(value) {
+export function isInteger(value) {
   const numberValue = Number(value);
   return !isNaN(numberValue) && Number.isInteger(numberValue);
 }
 
-function isReal(value) {
+export function isReal(value) {
   const numberValue = Number(value);
   return !isNaN(numberValue) && !Number.isInteger(numberValue);
 }
 
-function isArrayOrObject(value) {
+export function isArrayOrObject(value) {
   try {
     const parsedValue = JSON.parse(value);
     if (Array.isArray(parsedValue)) {
@@ -41,8 +41,7 @@ function isArrayOrObject(value) {
   return 'not-array-or-object';
 }
 
-function detectType(inputString, tagName = '', customRules = defaultRules) {
-  // Check custom rules first
+export function detectType(inputString, tagName = '', customRules = defaultRules) {
   for (const [type, tags] of Object.entries(customRules)) {
     if (tags.includes(tagName)) {
       return type;
@@ -69,13 +68,12 @@ function detectType(inputString, tagName = '', customRules = defaultRules) {
   return 'string';
 }
 
-// XML to JSON conversion (adapted for xmldom)
-function xmlToJson(xmlString, customRules = defaultRules) {
+// XML to JSON conversion
+export function xmlToJson(xmlString, customRules = defaultRules) {
   try {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlString, "text/xml");
     
-    // Check for parsing errors
     const parseError = xmlDoc.getElementsByTagName("parsererror")[0];
     if (parseError) {
       throw new Error("Invalid XML format: " + parseError.textContent);
@@ -95,7 +93,7 @@ function convertElement(element, customRules) {
     contents: null
   };
   
-  const childElements = Array.from(element.childNodes).filter(node => node.nodeType === 1); // Element nodes only
+  const childElements = Array.from(element.childNodes).filter(node => node.nodeType === 1);
   const textContent = element.textContent.trim();
   
   if (childElements.length > 0) {
@@ -129,8 +127,8 @@ function convertElement(element, customRules) {
   return result;
 }
 
-// SQL Schema Generation (same as web version)
-function generateFlatSqlSchema(jsonData) {
+// SQL Schema Generation
+export function generateFlatSqlSchema(jsonData) {
   let sql = "";
   const tables = new Map();
   const relationships = [];
@@ -146,13 +144,11 @@ function generateFlatSqlSchema(jsonData) {
     const tableName = sanitizeName(currentPath);
     
     if (node.type === "object" || node.type === "array") {
-      // Initialize table if not exists
       if (!tables.has(tableName)) {
         tables.set(tableName, []);
         tableCount++;
       }
       
-      // Add parent reference if exists
       if (parentTable) {
         const parentRef = `${sanitizeName(parentTable)}_id INTEGER NOT NULL`;
         if (!tables.get(tableName).includes(parentRef)) {
@@ -164,19 +160,15 @@ function generateFlatSqlSchema(jsonData) {
         });
       }
       
-      // Add ID field
       if (!tables.get(tableName).includes("id SERIAL PRIMARY KEY")) {
         tables.get(tableName).unshift("id SERIAL PRIMARY KEY");
       }
       
-      // Process children
       if (node.contents && Array.isArray(node.contents)) {
         node.contents.forEach(child => {
           if (child.type === "object" || child.type === "array") {
-            // Child object/array becomes related table
             processStructure(child, tableName, currentPath);
           } else {
-            // Primitive field
             let fieldType = "TEXT";
             switch (child.type) {
               case "integer": fieldType = "INTEGER"; break;
@@ -196,14 +188,11 @@ function generateFlatSqlSchema(jsonData) {
     }
   }
 
-  // Process the structure
   processStructure(jsonData);
 
-  // Generate SQL
   sql += "-- Generated SQL Schema from XML Structure\n";
   sql += "-- =========================================\n\n";
 
-  // Create tables
   for (const [tableName, fields] of tables) {
     sql += `-- Table: ${tableName}\n`;
     sql += `CREATE TABLE ${tableName} (\n`;
@@ -211,7 +200,6 @@ function generateFlatSqlSchema(jsonData) {
     sql += `);\n\n`;
   }
 
-  // Create foreign key constraints
   if (relationships.length > 0) {
     sql += "-- Foreign Key Constraints\n";
     sql += "-- =======================\n\n";
@@ -223,7 +211,6 @@ function generateFlatSqlSchema(jsonData) {
     });
   }
 
-  // Add statistics
   sql += `-- Schema Statistics:\n`;
   sql += `-- Tables: ${tableCount}\n`;
   sql += `-- Fields: ${fieldCount}\n`;
@@ -232,122 +219,118 @@ function generateFlatSqlSchema(jsonData) {
   return sql;
 }
 
-// CLI Interface
-const argv = yargs(hideBin(process.argv))
-  .option('xml', {
-    alias: 'x',
-    type: 'string',
-    description: 'XML input string',
-    conflicts: 'xml-file'
-  })
-  .option('xml-file', {
-    alias: 'f',
-    type: 'string',
-    description: 'Path to XML file',
-    conflicts: 'xml'
-  })
-  .option('rules', {
-    alias: 'r',
-    type: 'string',
-    description: 'Custom rules as JSON string'
-  })
-  .option('rules-file', {
-    alias: 'rf',
-    type: 'string',
-    description: 'Path to custom rules JSON file'
-  })
-  .option('output', {
-    alias: 'o',
-    type: 'string',
-    description: 'Output file for SQL (optional)'
-  })
-  .option('json-output', {
-    alias: 'j',
-    type: 'string',
-    description: 'Output file for JSON (optional)'
-  })
-  .option('verbose', {
-    alias: 'v',
-    type: 'boolean',
-    description: 'Run with verbose output'
-  })
-  .example('$0 -x "<root><item>test</item></root>"', 'Convert XML string to SQL')
-  .example('$0 -f input.xml -o schema.sql', 'Convert XML file to SQL file')
-  .example('$0 -f input.xml -rf rules.json', 'Use custom rules from file')
-  .demandOption(['xml', 'xml-file'], 'Must provide either XML string or XML file')
-  .help()
-  .argv;
+// === CLI FUNCTIONALITY === 
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const argv = yargs(hideBin(process.argv))
+    .option('xml', {
+      alias: 'x',
+      type: 'string',
+      description: 'XML input string',
+      conflicts: 'xml-file'
+    })
+    .option('xml-file', {
+      alias: 'f',
+      type: 'string',
+      description: 'Path to XML file',
+      conflicts: 'xml'
+    })
+    .option('rules', {
+      alias: 'r',
+      type: 'string',
+      description: 'Custom rules as JSON string'
+    })
+    .option('rules-file', {
+      alias: 'rf',
+      type: 'string',
+      description: 'Path to custom rules JSON file'
+    })
+    .option('output', {
+      alias: 'o',
+      type: 'string',
+      description: 'Output file for SQL (optional)'
+    })
+    .option('json-output', {
+      alias: 'j',
+      type: 'string',
+      description: 'Output file for JSON (optional)'
+    })
+    .option('verbose', {
+      alias: 'v',
+      type: 'boolean',
+      description: 'Run with verbose output'
+    })
+    .example('$0 -x "<root><item>test</item></root>"', 'Convert XML string to SQL')
+    .example('$0 -f input.xml -o schema.sql', 'Convert XML file to SQL file')
+    .example('$0 -f input.xml -rf rules.json', 'Use custom rules from file')
+    .check((argv, options) => {
+      // Verificar manualmente se pelo menos um dos argumentos foi fornecido
+      if (!argv.xml && !argv.xmlFile) {
+        throw new Error('Must provide either --xml or --xml-file');
+      }
+      return true; // tell Yargs that the arguments passed the check
+    })
+    .help()
+    .argv;
 
-// Main execution
-async function main() {
-  try {
-    let xmlContent = '';
-    let customRules = defaultRules;
-    
-    // Read XML content
-    if (argv.xml) {
-      xmlContent = argv.xml;
-      if (argv.verbose) console.log('📥 Using XML from command line argument');
-    } else if (argv.xmlFile) {
-      xmlContent = fs.readFileSync(argv.xmlFile, 'utf8');
-      if (argv.verbose) console.log(`📥 Read XML from file: ${argv.xmlFile}`);
-    }
-    
-    // Load custom rules if provided
-    if (argv.rules) {
-      try {
-        customRules = JSON.parse(argv.rules);
-        if (argv.verbose) console.log('📋 Using custom rules from command line');
-      } catch (e) {
-        throw new Error('Invalid rules JSON format: ' + e.message);
+  // Main execution
+  async function main() {
+    try {
+      let xmlContent = '';
+      let customRules = defaultRules;
+      
+      if (argv.xml) {
+        xmlContent = argv.xml;
+        if (argv.verbose) console.log('📥 Using XML from command line argument');
+      } else if (argv.xmlFile) {
+        xmlContent = fs.readFileSync(argv.xmlFile, 'utf8');
+        if (argv.verbose) console.log(`📥 Read XML from file: ${argv.xmlFile}`);
       }
-    } else if (argv.rulesFile) {
-      try {
-        const rulesContent = fs.readFileSync(argv.rulesFile, 'utf8');
-        customRules = JSON.parse(rulesContent);
-        if (argv.verbose) console.log(`📋 Using custom rules from file: ${argv.rulesFile}`);
-      } catch (e) {
-        throw new Error('Error loading rules file: ' + e.message);
+      
+      if (argv.rules) {
+        try {
+          customRules = JSON.parse(argv.rules);
+          if (argv.verbose) console.log('📋 Using custom rules from command line');
+        } catch (e) {
+          throw new Error('Invalid rules JSON format: ' + e.message);
+        }
+      } else if (argv.rulesFile) {
+        try {
+          const rulesContent = fs.readFileSync(argv.rulesFile, 'utf8');
+          customRules = JSON.parse(rulesContent);
+          if (argv.verbose) console.log(`📋 Using custom rules from file: ${argv.rulesFile}`);
+        } catch (e) {
+          throw new Error('Error loading rules file: ' + e.message);
+        }
       }
+      
+      if (argv.verbose) console.log('🔄 Converting XML to JSON...');
+      
+      const jsonResult = xmlToJson(xmlContent, customRules);
+      
+      if (argv.jsonOutput) {
+        fs.writeFileSync(argv.jsonOutput, JSON.stringify(jsonResult, null, 2));
+        if (argv.verbose) console.log(`💾 JSON saved to: ${argv.jsonOutput}`);
+      }
+      
+      if (argv.verbose) console.log('🔄 Generating SQL schema...');
+      
+      const sqlSchema = generateFlatSqlSchema(jsonResult);
+      
+      if (argv.output) {
+        fs.writeFileSync(argv.output, sqlSchema);
+        if (argv.verbose) console.log(`💾 SQL schema saved to: ${argv.output}`);
+      } else {
+        console.log(sqlSchema);
+      }
+      
+      if (argv.verbose) console.log('✅ Conversion completed successfully!');
+      
+    } catch (error) {
+      console.error('❌ Error:', error.message);
+      process.exit(1);
     }
-    
-    if (argv.verbose) {
-      console.log('🔄 Converting XML to JSON...');
-    }
-    
-    // Convert XML to JSON
-    const jsonResult = xmlToJson(xmlContent, customRules);
-    
-    // Output JSON if requested
-    if (argv.jsonOutput) {
-      fs.writeFileSync(argv.jsonOutput, JSON.stringify(jsonResult, null, 2));
-      if (argv.verbose) console.log(`💾 JSON saved to: ${argv.jsonOutput}`);
-    }
-    
-    if (argv.verbose) {
-      console.log('🔄 Generating SQL schema...');
-    }
-    
-    // Generate SQL schema
-    const sqlSchema = generateFlatSqlSchema(jsonResult);
-    
-    // Output SQL
-    if (argv.output) {
-      fs.writeFileSync(argv.output, sqlSchema);
-      if (argv.verbose) console.log(`💾 SQL schema saved to: ${argv.output}`);
-    } else {
-      console.log(sqlSchema);
-    }
-    
-    if (argv.verbose) {
-      console.log('✅ Conversion completed successfully!');
-    }
-    
-  } catch (error) {
-    console.error('❌ Error:', error.message);
-    process.exit(1);
   }
-}
 
-// Run the CLI
-main();
+  // Run the CLI
+  main();
+}

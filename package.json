@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node converter.js",
     "serve": "node server.js",
-    "electron": "electron electron-app.js",
+    "electron": "electron electron-app.js --no-sandbox",
     "build-electron": "electron-builder",
     "cordova-android": "cd cordova && cordova run android",
     "cordova-ios": "cd cordova && cordova run ios",
