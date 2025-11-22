@@ -1,0 +1,5 @@
+{
+  "string": ["CNPJ", "CPF", "CEP", "fone", "telefone", "chNFe", "IE"],
+  "integer": ["tpNF", "idDest", "tpImp", "tpEmis", "cDV"],
+  "real": ["vUnCom", "vProd", "vUnTrib", "pRedBC", "vBC"]
+}

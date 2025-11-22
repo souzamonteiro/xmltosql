@@ -1,0 +1,57 @@
+{
+  "name": "xml-to-sql-converter",
+  "version": "1.0.0",
+  "description": "Convert XML to JSON and generate SQL schema - CLI, Web, Electron and Cordova versions",
+  "main": "converter.js",
+  "type": "module",
+  "bin": {
+    "xml-to-sql": "./converter.js"
+  },
+  "scripts": {
+    "start": "node converter.js",
+    "serve": "node server.js",
+    "electron": "electron electron-app.js",
+    "build-electron": "electron-builder",
+    "cordova-android": "cd cordova && cordova run android",
+    "cordova-ios": "cd cordova && cordova run ios",
+    "test": "node test/test-converter.js"
+  },
+  "dependencies": {
+    "xmldom": "^0.6.0",
+    "yargs": "^17.7.2",
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "electron": "^25.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.0.0",
+    "cordova": "^11.0.0"
+  },
+  "keywords": [
+    "xml",
+    "sql",
+    "converter",
+    "cli",
+    "web",
+    "electron",
+    "cordova"
+  ],
+  "author": "Your Name",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/xml-to-sql-converter"
+  },
+  "build": {
+    "appId": "com.example.xml-to-sql-converter",
+    "productName": "XML to SQL Converter",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron-app.js",
+      "src/**/*",
+      "node_modules/**/*"
+    ]
+  }
+}
