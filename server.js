@@ -22,7 +22,7 @@ app.use(express.static(path.join(__dirname, 'src')));
 
 // Routes
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'src', 'index.html'));
+  res.sendFile(path.join(__dirname, 'www', 'index.html'));
 });
 
 // API endpoint for XML to JSON conversion
@@ -65,7 +65,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Web server running at http://localhost:${PORT}`);
   console.log(`📋 API endpoints:`);
   console.log(`   POST /api/convert-to-json`);

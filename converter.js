@@ -219,6 +219,48 @@ export function generateFlatSqlSchema(jsonData) {
   return sql;
 }
 
+// === API MODE FOR ELECTRON ===
+export async function handleApiRequest(inputData) {
+  try {
+    const data = typeof inputData === 'string' ? JSON.parse(inputData) : inputData;
+    
+    if (data.action === 'xmlToJson') {
+      const jsonResult = xmlToJson(data.xml, data.rules);
+      return JSON.stringify(jsonResult);
+    } 
+    else if (data.action === 'generateSql') {
+      const sqlSchema = generateFlatSqlSchema(data.json);
+      return sqlSchema;
+    }
+    else {
+      throw new Error('Unknown action: ' + data.action);
+    }
+  } catch (error) {
+    throw new Error('API request failed: ' + error.message);
+  }
+}
+
+// Check if running in API mode (called from electron wrapper)
+if (process.stdin && process.stdout && process.argv[1] && process.argv[1].includes('converter.js')) {
+  let inputData = '';
+  
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    inputData += chunk;
+  });
+  
+  process.stdin.on('end', async () => {
+    try {
+      const result = await handleApiRequest(inputData);
+      process.stdout.write(result);
+      process.exit(0);
+    } catch (error) {
+      process.stderr.write(error.message);
+      process.exit(1);
+    }
+  });
+}
+
 // === CLI FUNCTIONALITY === 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const argv = yargs(hideBin(process.argv))

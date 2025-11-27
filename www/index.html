@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>XML to JSON to SQL Converter</title>
+
+    <link rel="manifest" href="manifest.json">
     <style>
         * {
             box-sizing: border-box;
@@ -734,6 +736,19 @@
   </NFe>
 </nfeProc>`;
         });
+    </script>
+
+    <script>
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+            console.log('SW registered:', registration);
+            })
+            .catch(error => {
+            console.log('SW registration failed:', error);
+            });
+        }
     </script>
 </body>
 </html>
