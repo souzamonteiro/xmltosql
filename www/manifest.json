@@ -1,7 +1,7 @@
 {
   "name": "XML to SQL Converter",
   "short_name": "XML2SQL",
-  "start_url": "/",
+  "start_url": "./index.html",
   "display": "standalone",
   "theme_color": "#3498db",
   "background_color": "#f5f7fa",
