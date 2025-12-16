@@ -1,28 +1,35 @@
 #!/usr/bin/env node
 
 import express from 'express';
-import cors from 'cors';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DOMParser } from 'xmldom';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import https from 'https';
+import http from 'http';
 
 // Reuse the same conversion functions from converter.js
 import { xmlToJson, generateFlatSqlSchema, defaultRules } from './converter.js';
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+const app = express();
+const PORT_HTTP = 3000;
+const PORT_HTTPS = 3443;
+
+// Middleware to parse JSON requests
+app.use(express.json());
+
+// Serve static files from the www directory
 app.use(express.static(path.join(__dirname, 'www')));
 
-// Routes
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'www', 'index.html'));
+// Your existing endpoints
+app.get('/api/status', (req, res) => {
+    res.json({ status: 'Server is running', timestamp: new Date() });
+});
+
+app.get('/api/data', (req, res) => {
+    res.json({ message: 'This is API data' });
 });
 
 // API endpoint for XML to JSON conversion
@@ -59,16 +66,49 @@ app.post('/api/convert-to-sql', (req, res) => {
   }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+// Handle 404 for API routes
+app.use('/api/*', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' });
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Web server running at http://localhost:${PORT}`);
-  console.log(`📋 API endpoints:`);
-  console.log(`   POST /api/convert-to-json`);
-  console.log(`   POST /api/convert-to-sql`);
-  console.log(`   GET  /api/health`);
+// For non-API routes that aren't static files, serve index.html (for SPAs)
+app.get('*', (req, res) => {
+    // Check if the request is for an API endpoint
+    if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API endpoint not found' });
+    }
+    
+    // Otherwise, check if file exists in www directory
+    const filePath = path.join(__dirname, 'www', req.path);
+    if (fs.existsSync(filePath) && !fs.statSync(filePath).isDirectory()) {
+        return res.sendFile(filePath);
+    }
+    
+    // For Single Page Applications, serve index.html for routes not found
+    res.sendFile(path.join(__dirname, 'www', 'index.html'));
 });
+
+// Check for SSL certificates
+const sslOptions = {
+    key: fs.existsSync('localhost+2-key.pem') ? fs.readFileSync('localhost+2-key.pem') : null,
+    cert: fs.existsSync('localhost+2.pem') ? fs.readFileSync('localhost+2.pem') : null
+};
+
+// Start HTTP server
+http.createServer(app).listen(PORT_HTTP, () => {
+    console.log(`HTTP server running on port ${PORT_HTTP}`);
+});
+
+// Start HTTPS server if certificates exist
+if (sslOptions.key && sslOptions.cert) {
+    https.createServer(sslOptions, app).listen(PORT_HTTPS, () => {
+        console.log(`HTTPS server running on port ${PORT_HTTPS}`);
+    });
+    console.log('HTTPS enabled with SSL certificates');
+} else {
+    console.log('HTTPS not enabled - missing localhost+2-key.pem or localhost+2.pem files');
+    console.log('To generate self-signed certificates, run:');
+    console.log('openssl req -x509 -newkey rsa:4096 -keyout localhost+2-key.pem -out localhost+2.pem -days 365 -nodes');
+}
+
+console.log(`Server is configured to serve all files from: ${path.join(__dirname, 'www')}`);
