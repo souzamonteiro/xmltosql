@@ -193,6 +193,26 @@
             font-size: 14px;
         }
         
+        .tabs {
+            display: flex;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .tab-btn {
+            padding: 8px 16px;
+            background: #f1f1f1;
+            border: none;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+            cursor: pointer;
+        }
+        
+        .tab-btn.active {
+            background: #3498db;
+            color: white;
+        }
+        
         @media (max-width: 768px) {
             .converter-container {
                 flex-direction: column;
@@ -208,7 +228,7 @@
     <div class="container">
         <header>
             <h1>XML to JSON to SQL Converter</h1>
-            <p class="description">Convert XML to JSON and generate complete SQL schema with foreign key relationships.</p>
+            <p class="description">Convert XML to JSON and generate complete MySQL SQL schema with foreign key relationships and data INSERTs.</p>
         </header>
         
         <div class="converter-container">
@@ -246,14 +266,19 @@
                 <h2>JSON Output</h2>
                 <textarea id="json-output" placeholder="JSON output will appear here..." readonly></textarea>
                 <div class="actions">
-                    <button id="generate-sql-btn" class="generate-sql-btn">Generate SQL Schema</button>
+                    <button id="generate-sql-btn" class="generate-sql-btn">Generate SQL</button>
                 </div>
             </div>
         </div>
 
         <div class="sql-section">
-            <h2>SQL Schema Output</h2>
-            <textarea id="sql-output" class="sql-output" placeholder="SQL schema will appear here..." readonly></textarea>
+            <h2>SQL Output</h2>
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="schema">Schema</button>
+                <button class="tab-btn" data-tab="inserts">INSERTs</button>
+                <button class="tab-btn" data-tab="full">Full Script</button>
+            </div>
+            <textarea id="sql-output" class="sql-output" placeholder="SQL will appear here..." readonly></textarea>
             <div id="sql-stats" class="sql-stats"></div>
         </div>
     </div>
@@ -267,6 +292,11 @@
         };
 
         let currentJson = null;
+        let generatedSql = {
+            schema: "",
+            inserts: "",
+            full: ""
+        };
 
         // Data type detection functions
         function isString(value) {
@@ -346,8 +376,16 @@
             const result = {
                 name: element.tagName,
                 type: "",
-                contents: null
+                contents: null,
+                value: element.textContent.trim(),
+                attributes: {}
             };
+            
+            // Capture ALL attributes including xmlns
+            for (let i = 0; i < element.attributes.length; i++) {
+                const attr = element.attributes[i];
+                result.attributes[attr.name] = attr.value;
+            }
             
             const childElements = element.children;
             const textContent = element.textContent.trim();
@@ -383,105 +421,126 @@
             return result;
         }
 
-        // SQL Schema Generation
+        // Enhanced SQL Schema Generation with INSERTs
         function generateSqlSchema(jsonData) {
-            let sql = "";
-            const tables = new Set();
+            let schemaSql = "";
+            let insertSql = "";
+            const tables = new Map(); // tableName -> {fields: Set, data: []}
             const relationships = [];
             let tableCount = 0;
             let fieldCount = 0;
             let relationshipCount = 0;
+            let insertCount = 0;
 
             // Helper function to sanitize table names
             function sanitizeName(name) {
                 return name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
             }
 
-            // Recursive function to process JSON structure
-            function processNode(node, parentTable = null, parentIdField = null, level = 0) {
-                const tableName = sanitizeName(node.name);
-                const indent = "  ".repeat(level);
+            // Escape SQL values
+            function escapeSqlValue(value) {
+                if (value === null || value === undefined || value === '') {
+                    return 'NULL';
+                }
+                if (typeof value === 'string') {
+                    return "'" + value.replace(/'/g, "''") + "'";
+                }
+                return value;
+            }
+
+            // Recursive function to process JSON structure and collect data
+            function processNode(node, parentTable = null, parentId = null, tablePath = []) {
+                const currentTable = sanitizeName(node.name);
+                const fullTableName = tablePath.length > 0 ? 
+                    sanitizeName([...tablePath, node.name].join('_')) : 
+                    currentTable;
                 
                 if (node.type === "object" || node.type === "array") {
-                    // Create table for this object/array
-                    if (!tables.has(tableName)) {
-                        tables.add(tableName);
+                    // Create table entry if not exists
+                    if (!tables.has(fullTableName)) {
+                        tables.set(fullTableName, {
+                            fields: new Set(["id INT AUTO_INCREMENT PRIMARY KEY"]),
+                            data: [],
+                            lastId: 0,
+                            parentRef: null
+                        });
                         tableCount++;
-                        
-                        sql += `\n${indent}-- Table: ${tableName}\n`;
-                        sql += `${indent}CREATE TABLE ${tableName} (\n`;
-                        sql += `${indent}  id SERIAL PRIMARY KEY,\n`;
-                        
-                        // Add parent reference if exists
-                        if (parentTable && parentIdField) {
-                            sql += `${indent}  ${parentIdField} INTEGER NOT NULL,\n`;
-                            relationships.push({
-                                childTable: tableName,
-                                parentTable: parentTable,
-                                field: parentIdField
-                            });
-                            relationshipCount++;
-                        }
-                        
-                        // Process contents (fields or child objects)
-                        let fields = [];
-                        let childTables = [];
-                        
-                        if (node.contents && Array.isArray(node.contents)) {
-                            node.contents.forEach((child, index) => {
-                                if (child.type === "object" || child.type === "array") {
-                                    // This is a child table
-                                    const childTableName = processNode(
-                                        child, 
-                                        tableName, 
-                                        `${tableName}_id`,
-                                        level + 1
-                                    );
-                                    childTables.push(childTableName);
-                                } else {
-                                    // This is a field in current table
-                                    const fieldName = sanitizeName(child.name);
-                                    let fieldType = "TEXT";
-                                    
-                                    switch (child.type) {
-                                        case "integer":
-                                            fieldType = "INTEGER";
-                                            break;
-                                        case "real":
-                                            fieldType = "DECIMAL(15,4)";
-                                            break;
-                                        case "null":
-                                            fieldType = "TEXT";
-                                            break;
-                                        default:
-                                            fieldType = "TEXT";
-                                    }
-                                    
-                                    fields.push(`${indent}  ${fieldName} ${fieldType}`);
-                                    fieldCount++;
-                                }
-                            });
-                        }
-                        
-                        // Add all fields to CREATE TABLE
-                        sql += fields.join(",\n");
-                        
-                        if (fields.length > 0 || (parentTable && parentIdField)) {
-                            sql += "\n";
-                        }
-                        
-                        sql += `${indent});\n`;
-                        
-                        // Add foreign key constraints
-                        if (parentTable && parentIdField) {
-                            sql += `\n${indent}-- Foreign key constraint for ${tableName}\n`;
-                            sql += `${indent}ALTER TABLE ${tableName}\n`;
-                            sql += `${indent}ADD CONSTRAINT fk_${tableName}_${parentIdField}\n`;
-                            sql += `${indent}FOREIGN KEY (${parentIdField}) REFERENCES ${parentTable}(id);\n`;
-                        }
                     }
                     
-                    return tableName;
+                    // Generate ID for this row
+                    const rowId = tables.get(fullTableName).lastId + 1;
+                    tables.get(fullTableName).lastId = rowId;
+                    
+                    // Prepare row data
+                    const rowData = { id: rowId };
+                    
+                    // Add parent reference if exists
+                    if (parentTable && parentId) {
+                        const parentRefField = `${parentTable}_id`;
+                        tables.get(fullTableName).fields.add(`${parentRefField} INT NOT NULL`);
+                        tables.get(fullTableName).parentRef = parentTable;
+                        rowData[parentRefField] = parentId;
+                        
+                        relationships.push({
+                            childTable: fullTableName,
+                            parentTable: parentTable,
+                            field: parentRefField
+                        });
+                        relationshipCount++;
+                    }
+                    
+                    // Add attributes as fields
+                    for (const [attrName, attrValue] of Object.entries(node.attributes)) {
+                        const fieldName = `${sanitizeName(attrName)}_attr`;
+                        tables.get(fullTableName).fields.add(`${fieldName} VARCHAR(255)`);
+                        fieldCount++;
+                        rowData[fieldName] = attrValue;
+                    }
+                    
+                    // Process contents (fields or child objects)
+                    if (node.contents && Array.isArray(node.contents)) {
+                        node.contents.forEach((child, index) => {
+                            if (child.type === "object" || child.type === "array") {
+                                // This is a child table - recursively process
+                                const childRowId = processNode(
+                                    child, 
+                                    fullTableName, 
+                                    rowId,
+                                    [...tablePath, node.name]
+                                );
+                            } else {
+                                // This is a field in current table
+                                const fieldName = sanitizeName(child.name);
+                                let fieldType = "VARCHAR(500)";
+                                
+                                switch (child.type) {
+                                    case "integer":
+                                        fieldType = "INT";
+                                        break;
+                                    case "real":
+                                        fieldType = "DECIMAL(15,4)";
+                                        break;
+                                    case "null":
+                                        fieldType = "VARCHAR(255)";
+                                        break;
+                                    default:
+                                        fieldType = "VARCHAR(500)";
+                                }
+                                
+                                tables.get(fullTableName).fields.add(`${fieldName} ${fieldType}`);
+                                fieldCount++;
+                                
+                                // Store value in row data
+                                rowData[fieldName] = child.contents;
+                            }
+                        });
+                    }
+                    
+                    // Store row data
+                    tables.get(fullTableName).data.push(rowData);
+                    insertCount++;
+                    
+                    return rowId;
                     
                 } else {
                     // Primitive field - should be handled by parent table
@@ -490,117 +549,82 @@
             }
 
             // Start processing from root
-            sql += "-- Generated SQL Schema from XML Structure\n";
-            sql += "-- =========================================\n";
+            schemaSql += "-- Generated MySQL SQL Schema from XML Structure\n";
+            schemaSql += "-- =================================================\n";
             processNode(jsonData);
 
-            // Add statistics
-            const stats = `\n-- Schema Statistics:\n-- Tables: ${tableCount}\n-- Fields: ${fieldCount}\n-- Relationships: ${relationshipCount}\n`;
-            
-            return sql + stats;
-        }
-
-        // Alternative simpler approach for complex nested structures
-        function generateFlatSqlSchema(jsonData) {
-            let sql = "";
-            const tables = new Map(); // tableName -> fields
-            const relationships = [];
-            let tableCount = 0;
-            let fieldCount = 0;
-
-            function sanitizeName(name) {
-                return name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+            // Generate CREATE TABLE statements with IF NOT EXISTS
+            for (const [tableName, tableInfo] of tables) {
+                schemaSql += `\n-- Table: ${tableName}\n`;
+                schemaSql += `CREATE TABLE IF NOT EXISTS ${tableName} (\n`;
+                schemaSql += `  ${Array.from(tableInfo.fields).join(",\n  ")}\n`;
+                schemaSql += `) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n`;
             }
 
-            function processStructure(node, parentTable = null, path = "") {
-                const currentPath = path ? `${path}_${node.name}` : node.name;
-                const tableName = sanitizeName(currentPath);
-                
-                if (node.type === "object" || node.type === "array") {
-                    // Initialize table if not exists
-                    if (!tables.has(tableName)) {
-                        tables.set(tableName, []);
-                        tableCount++;
-                    }
-                    
-                    // Add parent reference if exists
-                    if (parentTable) {
-                        const parentRef = `${sanitizeName(parentTable)}_id INTEGER NOT NULL`;
-                        if (!tables.get(tableName).includes(parentRef)) {
-                            tables.get(tableName).push(parentRef);
-                        }
-                        relationships.push({
-                            child: tableName,
-                            parent: parentTable
-                        });
-                    }
-                    
-                    // Add ID field
-                    if (!tables.get(tableName).includes("id SERIAL PRIMARY KEY")) {
-                        tables.get(tableName).unshift("id SERIAL PRIMARY KEY");
-                    }
-                    
-                    // Process children
-                    if (node.contents && Array.isArray(node.contents)) {
-                        node.contents.forEach(child => {
-                            if (child.type === "object" || child.type === "array") {
-                                // Child object/array becomes related table
-                                processStructure(child, tableName, currentPath);
-                            } else {
-                                // Primitive field
-                                let fieldType = "TEXT";
-                                switch (child.type) {
-                                    case "integer": fieldType = "INTEGER"; break;
-                                    case "real": fieldType = "DECIMAL(15,4)"; break;
-                                    case "null": fieldType = "TEXT"; break;
-                                    default: fieldType = "TEXT";
-                                }
-                                
-                                const fieldDef = `${sanitizeName(child.name)} ${fieldType}`;
-                                if (!tables.get(tableName).includes(fieldDef)) {
-                                    tables.get(tableName).push(fieldDef);
-                                    fieldCount++;
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-
-            // Process the structure
-            processStructure(jsonData);
-
-            // Generate SQL
-            sql += "-- Generated SQL Schema from XML Structure\n";
-            sql += "-- =========================================\n\n";
-
-            // Create tables
-            for (const [tableName, fields] of tables) {
-                sql += `-- Table: ${tableName}\n`;
-                sql += `CREATE TABLE ${tableName} (\n`;
-                sql += `  ${fields.join(",\n  ")}\n`;
-                sql += `);\n\n`;
-            }
-
-            // Create foreign key constraints
+            // Generate foreign key constraints
             if (relationships.length > 0) {
-                sql += "-- Foreign Key Constraints\n";
-                sql += "-- =======================\n\n";
+                schemaSql += `\n-- Foreign Key Constraints\n`;
+                schemaSql += `-- =======================\n`;
                 
                 relationships.forEach(rel => {
-                    sql += `ALTER TABLE ${rel.child}\n`;
-                    sql += `ADD CONSTRAINT fk_${rel.child}_${rel.parent}\n`;
-                    sql += `FOREIGN KEY (${rel.parent}_id) REFERENCES ${rel.parent}(id);\n\n`;
+                    schemaSql += `\nALTER TABLE ${rel.childTable}\n`;
+                    schemaSql += `ADD CONSTRAINT fk_${rel.childTable}_${rel.field}\n`;
+                    schemaSql += `FOREIGN KEY (${rel.field}) REFERENCES ${rel.parentTable}(id);\n`;
                 });
             }
 
-            // Add statistics
-            sql += `-- Schema Statistics:\n`;
-            sql += `-- Tables: ${tableCount}\n`;
-            sql += `-- Fields: ${fieldCount}\n`;
-            sql += `-- Relationships: ${relationships.length}\n`;
+            // Generate INSERT statements
+            insertSql += "-- INSERT Statements for Data\n";
+            insertSql += "-- =========================\n";
+            
+            // Insert data in parent-first order
+            const insertedTables = new Set();
+            
+            function insertTableData(tableName) {
+                if (insertedTables.has(tableName)) return;
+                
+                const tableInfo = tables.get(tableName);
+                const parentTable = tableInfo.parentRef;
+                
+                // Insert parent data first
+                if (parentTable && !insertedTables.has(parentTable)) {
+                    insertTableData(parentTable);
+                }
+                
+                if (tableInfo.data.length > 0) {
+                    insertSql += `\n-- Data for table: ${tableName}\n`;
+                    
+                    tableInfo.data.forEach((row) => {
+                        const fields = Object.keys(row);
+                        const values = fields.map(field => escapeSqlValue(row[field]));
+                        
+                        insertSql += `INSERT INTO ${tableName} (${fields.join(', ')}) \n`;
+                        insertSql += `VALUES (${values.join(', ')});\n`;
+                    });
+                }
+                
+                insertedTables.add(tableName);
+            }
+            
+            // Start inserting from all tables
+            for (const [tableName] of tables) {
+                insertTableData(tableName);
+            }
 
-            return sql;
+            // Combine everything for full script
+            const fullSql = schemaSql + "\n\n" + insertSql;
+
+            return {
+                schema: schemaSql,
+                inserts: insertSql,
+                full: fullSql,
+                stats: {
+                    tables: tableCount,
+                    fields: fieldCount,
+                    relationships: relationshipCount,
+                    inserts: insertCount
+                }
+            };
         }
 
         // DOM elements and event listeners
@@ -615,6 +639,7 @@
         const errorMessage = document.getElementById('error-message');
         const rulesSuccess = document.getElementById('rules-success');
         const sqlStats = document.getElementById('sql-stats');
+        const tabBtns = document.querySelectorAll('.tab-btn');
 
         function loadSavedRules() {
             const savedRules = localStorage.getItem('xmlToJsonRules');
@@ -653,6 +678,18 @@
             errorMessage.style.display = 'none';
         }
 
+        function switchTab(tabName) {
+            // Update tab buttons
+            tabBtns.forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.tab === tabName);
+            });
+            
+            // Show selected tab content
+            if (generatedSql[tabName]) {
+                sqlOutput.value = generatedSql[tabName];
+            }
+        }
+
         convertBtn.addEventListener('click', () => {
             const xmlContent = xmlInput.value.trim();
             
@@ -684,23 +721,19 @@
             }
             
             try {
-                const sqlSchema = generateFlatSqlSchema(currentJson);
-                sqlOutput.value = sqlSchema;
+                const sqlResult = generateSqlSchema(currentJson);
+                generatedSql = sqlResult;
+                
+                // Switch to schema tab by default
+                switchTab('schema');
                 
                 // Show statistics
-                const tables = sqlSchema.match(/CREATE TABLE/g) || [];
-                const fields = sqlSchema.match(/CREATE TABLE[\\s\\S]*?\\([\\s\\S]*?\\)/g) || [];
-                let fieldCount = 0;
-                fields.forEach(table => {
-                    fieldCount += (table.match(/\\n  [a-zA-Z_]/g) || []).length;
-                });
-                const relationships = sqlSchema.match(/FOREIGN KEY/g) || [];
-                
                 sqlStats.innerHTML = `
                     <strong>Schema Statistics:</strong><br>
-                    Tables: ${tables.length} | 
-                    Fields: ${fieldCount} | 
-                    Relationships: ${relationships.length}
+                    Tables: ${sqlResult.stats.tables} | 
+                    Fields: ${sqlResult.stats.fields} | 
+                    Relationships: ${sqlResult.stats.relationships} |
+                    INSERT statements: ${sqlResult.stats.inserts}
                 `;
                 
             } catch (error) {
@@ -713,12 +746,20 @@
             jsonOutput.value = "";
             sqlOutput.value = "";
             currentJson = null;
+            generatedSql = {schema: "", inserts: "", full: ""};
             hideError();
             sqlStats.innerHTML = "";
             generateSqlBtn.disabled = true;
         });
 
         saveRulesBtn.addEventListener('click', saveRules);
+
+        // Tab switching
+        tabBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                switchTab(btn.dataset.tab);
+            });
+        });
 
         // Initialize
         window.addEventListener('DOMContentLoaded', () => {
