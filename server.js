@@ -8,7 +8,7 @@ import https from 'https';
 import http from 'http';
 
 // Reuse the same conversion functions from converter.js
-import { xmlToJson, generateFlatSqlSchema, defaultRules } from './converter.js';
+import { xmlToJson, generateSqlSchema, defaultRules } from './converter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,7 +58,7 @@ app.post('/api/convert-to-sql', (req, res) => {
     }
 
     const jsonResult = xmlToJson(xml, rules);
-    const sqlSchema = generateFlatSqlSchema(jsonResult);
+    const sqlSchema = generateSqlSchema(jsonResult);
     
     res.json({ success: true, result: sqlSchema });
   } catch (error) {
