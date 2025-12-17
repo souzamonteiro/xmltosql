@@ -304,6 +304,7 @@
             <textarea id="sql-output" class="sql-output" placeholder="SQL will appear here..." readonly></textarea>
             <div class="actions">
                 <button id="download-sql-btn" class="download-btn" disabled>Download SQL</button>
+                <button id="download-full-sql-btn" class="download-btn" disabled style="background-color: #8e44ad;">Download Full SQL</button>
             </div>
             <div id="sql-stats" class="sql-stats"></div>
         </div>
@@ -447,12 +448,13 @@
             return result;
         }
 
-        // Enhanced SQL Schema Generation with INSERTs using SELECT MAX(id) - offset
+        // Enhanced SQL Schema Generation with INSERTs using session variables for console MySQL
         function generateSqlSchema(jsonData) {
             let schemaSql = "";
             let insertSql = "";
-            const tables = new Map(); // tableName -> {fields: Set, data: []}
+            const tables = new Map(); // tableName -> {fields: Set, data: [], parentRef: null}
             const relationships = [];
+            const relationshipSet = new Set(); // To avoid duplicate foreign keys
             let tableCount = 0;
             let fieldCount = 0;
             let relationshipCount = 0;
@@ -469,14 +471,17 @@
                     return 'NULL';
                 }
                 if (typeof value === 'string') {
+                    // Check if it's a number disguised as string
+                    if (!isNaN(value) && value.trim() !== '') {
+                        const num = Number(value);
+                        if (!isNaN(num)) {
+                            return value;
+                        }
+                    }
                     return "'" + value.replace(/'/g, "''") + "'";
                 }
                 return value;
             }
-
-            // NEW: Structure to track parent-child relationships and sibling counts
-            const tableHierarchy = new Map(); // tableName -> {parent: null|string, children: [], siblingIndex: Map<parentId, count>}
-            const insertedData = []; // Array to store insert statements in order
 
             // Recursive function to process JSON structure and collect data
             function processNode(node, parentTable = null, parentId = null, tablePath = [], siblingIndex = 0) {
@@ -486,54 +491,55 @@
                     currentTable;
                 
                 if (node.type === "object" || node.type === "array") {
-                    // Initialize table hierarchy if not exists
-                    if (!tableHierarchy.has(fullTableName)) {
-                        tableHierarchy.set(fullTableName, {
-                            parent: parentTable,
-                            children: [],
-                            siblingIndex: new Map()
-                        });
-                    }
-                    
-                    // Track sibling index for this parent
-                    if (parentTable) {
-                        const hierarchy = tableHierarchy.get(fullTableName);
-                        const currentCount = hierarchy.siblingIndex.get(parentTable) || 0;
-                        hierarchy.siblingIndex.set(parentTable, currentCount + 1);
-                    }
-                    
                     // Create table entry if not exists
                     if (!tables.has(fullTableName)) {
                         tables.set(fullTableName, {
                             fields: new Set(["id INT AUTO_INCREMENT PRIMARY KEY"]),
                             data: [],
-                            parentRef: null
+                            parentRef: null,
+                            variableName: `@${fullTableName}_id`
                         });
                         tableCount++;
                     }
                     
-                    // Prepare row data (without id for now)
+                    const tableInfo = tables.get(fullTableName);
+                    
+                    // Prepare row data
                     const rowData = {};
                     
                     // Store parent reference if exists
                     if (parentTable) {
                         const parentRefField = `${parentTable}_id`;
-                        tables.get(fullTableName).fields.add(`${parentRefField} INT NOT NULL`);
-                        tables.get(fullTableName).parentRef = parentTable;
+                        tableInfo.fields.add(`${parentRefField} INT NOT NULL`);
+                        tableInfo.parentRef = parentTable;
                         
-                        // Store relationship for foreign key
-                        relationships.push({
-                            childTable: fullTableName,
-                            parentTable: parentTable,
-                            field: parentRefField
-                        });
-                        relationshipCount++;
+                        // Store relationship for foreign key (avoid duplicates)
+                        const relKey = `${fullTableName}|${parentTable}|${parentRefField}`;
+                        if (!relationshipSet.has(relKey)) {
+                            relationshipSet.add(relKey);
+                            relationships.push({
+                                childTable: fullTableName,
+                                parentTable: parentTable,
+                                field: parentRefField
+                            });
+                            relationshipCount++;
+                        }
                     }
                     
                     // Add attributes as fields
                     for (const [attrName, attrValue] of Object.entries(node.attributes)) {
                         const fieldName = `${sanitizeName(attrName)}_attr`;
-                        tables.get(fullTableName).fields.add(`${fieldName} VARCHAR(255)`);
+                        
+                        // Determine appropriate data type for attribute
+                        let fieldType = "VARCHAR(255)";
+                        const detectedType = detectType(attrValue, attrName);
+                        if (detectedType === "integer") {
+                            fieldType = "INT";
+                        } else if (detectedType === "real") {
+                            fieldType = "DECIMAL(15,4)";
+                        }
+                        
+                        tableInfo.fields.add(`${fieldName} ${fieldType}`);
                         fieldCount++;
                         rowData[fieldName] = attrValue;
                     }
@@ -578,7 +584,7 @@
                                     fieldType = "VARCHAR(500)";
                             }
                             
-                            tables.get(fullTableName).fields.add(`${fieldName} ${fieldType}`);
+                            tableInfo.fields.add(`${fieldName} ${fieldType}`);
                             fieldCount++;
                             
                             // Store value in row data
@@ -587,28 +593,27 @@
                         
                         // Process child tables recursively
                         childTables.forEach((item, childIndex) => {
-                            const childRowId = processNode(
+                            processNode(
                                 item.child,
                                 fullTableName,
-                                null, // Will be determined during insert generation
+                                null,
                                 [...tablePath, node.name],
                                 childIndex
                             );
                         });
                     }
                     
-                    // Store row data with metadata for insert generation
-                    const rowWithMeta = {
+                    // Store row data
+                    tableInfo.data.push({
                         table: fullTableName,
                         data: rowData,
                         parentTable: parentTable,
                         siblingIndex: siblingIndex
-                    };
+                    });
                     
-                    tables.get(fullTableName).data.push(rowWithMeta);
                     insertCount++;
                     
-                    return rowWithMeta;
+                    return fullTableName;
                     
                 } else {
                     // Primitive field - should be handled by parent table
@@ -629,116 +634,79 @@
                 schemaSql += `) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n`;
             }
 
-            // Generate foreign key constraints
+            // Generate foreign key constraints (without duplicates)
             if (relationships.length > 0) {
                 schemaSql += `\n-- Foreign Key Constraints\n`;
                 schemaSql += `-- =======================\n`;
                 
                 relationships.forEach(rel => {
                     schemaSql += `\nALTER TABLE ${rel.childTable}\n`;
-                    schemaSql += `ADD CONSTRAINT fk_${rel.childTable}_${rel.field}\n`;
+                    schemaSql += `ADD CONSTRAINT fk_${rel.childTable}_${rel.field.replace('_id', '')}\n`;
                     schemaSql += `FOREIGN KEY (${rel.field}) REFERENCES ${rel.parentTable}(id);\n`;
                 });
             }
 
-            // NEW: Generate INSERT statements with SELECT MAX(id) - offset
+            // Generate INSERT statements using MySQL session variables for console execution
+            insertSql += "-- INSERT Statements with MySQL Session Variables\n";
+            insertSql += "-- ==============================================\n";
+            insertSql += "-- This script uses MySQL session variables (@variables) to maintain\n";
+            insertSql += "-- referential integrity. Execute in MySQL console or client.\n\n";
             insertSql += "START TRANSACTION;\n\n";
-            insertSql += "-- INSERT Statements for Data\n";
-            insertSql += "-- =========================\n";
+
+            // Track processed tables to avoid duplicates
+            const processedTables = new Set();
             
-            // We need to process inserts in hierarchical order (root first)
-            // First, flatten all data with proper hierarchy tracking
-            const allInserts = [];
-            
-            function collectInserts(tableName) {
-                const tableInfo = tables.get(tableName);
-                if (!tableInfo) return;
-                
-                tableInfo.data.forEach((rowData, rowIndex) => {
-                    allInserts.push({
-                        table: tableName,
-                        data: rowData.data,
-                        parentTable: rowData.parentTable,
-                        siblingIndex: rowData.siblingIndex,
-                        rowIndex: rowIndex
-                    });
+            // Get tables in hierarchical order (roots first)
+            const sortedTables = Array.from(tables.entries())
+                .sort(([aName, aInfo], [bName, bInfo]) => {
+                    // Tables without parent go first
+                    if (!aInfo.parentRef && bInfo.parentRef) return -1;
+                    if (aInfo.parentRef && !bInfo.parentRef) return 1;
+                    
+                    // Otherwise maintain original order
+                    return 0;
                 });
-            }
-            
-            // Collect all inserts
-            for (const [tableName] of tables) {
-                collectInserts(tableName);
-            }
-            
-            // Track the number of inserts per table for offset calculation
-            const insertCounts = new Map();
-            
-            // Process inserts in order (root tables first)
-            const processedInserts = [];
-            
-            function processTableInserts(tableName) {
-                const tableInfo = tables.get(tableName);
-                if (!tableInfo) return;
-                
-                const parentTable = tableInfo.parentRef;
-                
-                // Process parent first if exists
-                if (parentTable) {
-                    processTableInserts(parentTable);
+
+            // Process each table
+            for (const [tableName, tableInfo] of sortedTables) {
+                if (processedTables.has(tableName)) {
+                    continue;
                 }
-                
-                // Process this table's inserts
-                tableInfo.data.forEach((rowData, index) => {
+                processedTables.add(tableName);
+
+                // Process each row of data for this table
+                tableInfo.data.forEach((rowData, rowIndex) => {
                     const fields = Object.keys(rowData.data);
-                    const values = [];
+                    const values = fields.map(field => escapeSqlValue(rowData.data[field]));
                     
-                    // Add all regular fields
-                    fields.forEach(field => {
-                        values.push(escapeSqlValue(rowData.data[field]));
-                    });
-                    
-                    // Handle parent reference
-                    if (parentTable) {
-                        // Calculate offset: total inserts in child table minus current index minus 1
-                        const totalChildInserts = insertCounts.get(tableName) || 0;
-                        const offset = totalChildInserts - index - 1;
+                    if (tableInfo.parentRef) {
+                        // Child table - use parent variable
+                        const parentVar = `@${tableInfo.parentRef}_id`;
                         
-                        // Add parent reference with SELECT MAX(id) - offset
-                        const parentRef = `(SELECT MAX(id) - ${offset} FROM ${parentTable})`;
-                        values.unshift(parentRef);
-                        
-                        insertSql += `\n-- Insert into ${tableName} (${parentTable}_id, ${fields.join(', ')})\n`;
-                        insertSql += `INSERT INTO ${tableName} (${parentTable}_id, ${fields.join(', ')}) \n`;
-                        insertSql += `VALUES (${parentRef}, ${values.slice(1).join(', ')});\n`;
+                        insertSql += `-- Insert into ${tableName} (child of ${tableInfo.parentRef})\n`;
+                        insertSql += `SET @${tableName}_id = NULL;\n`;
+                        insertSql += `INSERT INTO ${tableName} (${tableInfo.parentRef}_id, ${fields.join(', ')}) \n`;
+                        insertSql += `VALUES (${parentVar}, ${values.join(', ')});\n`;
+                        insertSql += `SET @${tableName}_id = LAST_INSERT_ID();\n\n`;
                     } else {
                         // Root table
-                        values.unshift('DEFAULT'); // For auto-increment id
+                        insertSql += `-- Insert into ${tableName} (root table)\n`;
+                        insertSql += `SET @${tableName}_id = NULL;\n`;
                         
-                        insertSql += `\n-- Insert into ${tableName} (id, ${fields.join(', ')})\n`;
-                        insertSql += `INSERT INTO ${tableName} (id, ${fields.join(', ')}) \n`;
-                        insertSql += `VALUES (${values.join(', ')});\n`;
+                        if (fields.length > 0) {
+                            insertSql += `INSERT INTO ${tableName} (${fields.join(', ')}) \n`;
+                            insertSql += `VALUES (${values.join(', ')});\n`;
+                        } else {
+                            // Handle tables with only id column
+                            insertSql += `INSERT INTO ${tableName} () VALUES ();\n`;
+                        }
+                        
+                        insertSql += `SET @${tableName}_id = LAST_INSERT_ID();\n\n`;
                     }
-                    
-                    // Update insert count
-                    insertCounts.set(tableName, (insertCounts.get(tableName) || 0) + 1);
                 });
             }
-            
-            // Start processing from root tables (tables without parent)
-            for (const [tableName, tableInfo] of tables) {
-                if (!tableInfo.parentRef) {
-                    processTableInserts(tableName);
-                }
-            }
-            
-            // Then process child tables
-            for (const [tableName, tableInfo] of tables) {
-                if (tableInfo.parentRef) {
-                    processTableInserts(tableName);
-                }
-            }
-            
-            insertSql += "\nCOMMIT;\n";
+
+            insertSql += "COMMIT;\n";
 
             // Combine everything for full script
             const fullSql = schemaSql + "\n\n" + insertSql;
@@ -805,6 +773,7 @@
         const loadFileBtn = document.getElementById('load-file-btn');
         const downloadJsonBtn = document.getElementById('download-json-btn');
         const downloadSqlBtn = document.getElementById('download-sql-btn');
+        const downloadFullSqlBtn = document.getElementById('download-full-sql-btn');
         const rulesInput = document.getElementById('rules-input');
         const saveRulesBtn = document.getElementById('save-rules-btn');
         const generateSqlBtn = document.getElementById('generate-sql-btn');
@@ -860,6 +829,13 @@
             if (generatedSql[tabName]) {
                 sqlOutput.value = generatedSql[tabName];
             }
+            
+            // Update download button text
+            if (tabName === 'full') {
+                downloadSqlBtn.textContent = 'Download Full SQL';
+            } else {
+                downloadSqlBtn.textContent = 'Download SQL (' + tabName + ')';
+            }
         }
 
         function updateButtonStates() {
@@ -869,6 +845,7 @@
             downloadJsonBtn.disabled = !hasJson;
             generateSqlBtn.disabled = !hasJson;
             downloadSqlBtn.disabled = !hasSql;
+            downloadFullSqlBtn.disabled = !generatedSql.full;
         }
 
         loadFileBtn.addEventListener('click', async () => {
@@ -919,10 +896,28 @@
         });
 
         downloadSqlBtn.addEventListener('click', () => {
-            const sqlContent = sqlOutput.value;
+            const currentTab = document.querySelector('.tab-btn.active').dataset.tab;
+            const sqlContent = generatedSql[currentTab] || sqlOutput.value;
+            
             if (sqlContent) {
-                const filename = 'sql_schema_' + new Date().toISOString().slice(0, 10) + '.sql';
+                let filename = 'sql_output_' + new Date().toISOString().slice(0, 10);
+                
+                if (currentTab === 'schema') {
+                    filename += '_schema.sql';
+                } else if (currentTab === 'inserts') {
+                    filename += '_inserts.sql';
+                } else {
+                    filename += '_full.sql';
+                }
+                
                 downloadFile(sqlContent, filename, 'text/sql');
+            }
+        });
+
+        downloadFullSqlBtn.addEventListener('click', () => {
+            if (generatedSql.full) {
+                const filename = 'complete_schema_' + new Date().toISOString().slice(0, 10) + '.sql';
+                downloadFile(generatedSql.full, filename, 'text/sql');
             }
         });
 
@@ -936,11 +931,12 @@
                 const sqlResult = generateSqlSchema(currentJson);
                 generatedSql = sqlResult;
                 
-                // Switch to schema tab by default
-                switchTab('schema');
+                // Switch to full tab by default to show complete script
+                switchTab('full');
                 
-                // Enable SQL download button
+                // Enable SQL download buttons
                 downloadSqlBtn.disabled = false;
+                downloadFullSqlBtn.disabled = false;
                 updateButtonStates();
                 
                 // Show statistics
@@ -954,7 +950,9 @@
                 
             } catch (error) {
                 showError("Error generating SQL: " + error.message);
+                console.error(error);
                 downloadSqlBtn.disabled = true;
+                downloadFullSqlBtn.disabled = true;
                 updateButtonStates();
             }
         });
@@ -970,6 +968,7 @@
             downloadJsonBtn.disabled = true;
             generateSqlBtn.disabled = true;
             downloadSqlBtn.disabled = true;
+            downloadFullSqlBtn.disabled = true;
             updateButtonStates();
         });
 
@@ -989,6 +988,7 @@
             // Set initial button states
             updateButtonStates();
             
+            // Load example XML
             xmlInput.value = `<?xml version="1.0" encoding="UTF-8"?>
 <nfeProc versao="4.00" xmlns="http://www.portalfiscal.inf.br/nfe">
   <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
