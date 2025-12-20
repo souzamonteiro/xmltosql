@@ -1,19 +1,45 @@
-<svg width="192" height="192" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
+<svg
+  width="192"
+  height="192"
+  viewBox="0 0 192 192"
+  xmlns="http://www.w3.org/2000/svg"
+>
   <defs>
     <linearGradient id="grad4" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#9b59b6;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#8e44ad;stop-opacity:1" />
+      <stop offset="0%" stop-color="#9b59b6"/>
+      <stop offset="100%" stop-color="#8e44ad"/>
     </linearGradient>
   </defs>
-  
-  <!-- Fundo -->
+
+  <!-- Background -->
   <rect width="192" height="192" rx="32" fill="url(#grad4)"/>
-  
-  <!-- Texto XML2SQL -->
-  <text x="96" y="110" text-anchor="middle" fill="white" font-family="Arial, sans-serif" font-size="28" font-weight="bold">
-    XML2SQL
-  </text>
-  
-  <!-- Linha decorativa -->
-  <line x1="40" y1="80" x2="152" y2="80" stroke="white" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- SAFE ZONE -->
+  <g transform="translate(24 24) scale(0.75)">
+
+    <!-- Decorative line -->
+    <line
+      x1="32"
+      y1="80"
+      x2="160"
+      y2="80"
+      stroke="white"
+      stroke-width="4"
+      stroke-linecap="round"
+    />
+
+    <!-- Text -->
+    <text
+      x="96"
+      y="120"
+      text-anchor="middle"
+      fill="white"
+      font-family="Arial, sans-serif"
+      font-size="24"
+      font-weight="bold"
+    >
+      XML2SQL
+    </text>
+
+  </g>
 </svg>
