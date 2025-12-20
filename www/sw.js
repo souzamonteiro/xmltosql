@@ -1,4 +1,4 @@
-const CACHE_NAME = 'morsecodewebapp-v4';
+const CACHE_NAME = 'xmltosq-v5';
 const urlsToCache = [
   './',
   './index.html',
